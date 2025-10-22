@@ -18,7 +18,7 @@ UPLOAD_FORM = """
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>EDL Timecode Uploader</title>
+  <title>EDL Timecode Updater</title>
   <style>
     body { font-family: system-ui, sans-serif; padding: 40px; background: #f5f5f5; }
     form { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); width: 400px; margin: auto; }
