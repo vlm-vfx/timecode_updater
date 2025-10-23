@@ -39,7 +39,7 @@ def fmp_login():
     raise Exception(f"❌ FMP Login failed: {r.text}")
 
 
-def fmp_update_timecode_and_cut(token, shot_code, timecode):
+def fmp_update_timecode_and_cut(token, shot_code, timecode, cut_version):
     """Find and update a record in FileMaker where Shot Code matches"""
     try:
         # --- Find matching record ---
@@ -62,7 +62,12 @@ def fmp_update_timecode_and_cut(token, shot_code, timecode):
 
         # --- Update Timecode and Cut fields ---
         url_update = f"{FMP_SERVER}/fmi/data/vLatest/databases/{FMP_DB}/layouts/status_update/records/{record_id}"
-        update_data = {"fieldData": {"Timecode": timecode}, {"Cut Version": cut_version}}
+        update_data = {
+            "fieldData": {
+                "Timecode": timecode,
+                "Cut Version": cut_version
+            }
+        }
         update_response = requests.patch(url_update, headers=headers, json=update_data)
 
         if update_response.status_code == 200:
