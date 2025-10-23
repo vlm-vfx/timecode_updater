@@ -7,7 +7,9 @@ from shotgun_api3 import Shotgun
 
 app = Flask(__name__)
 
-# --- CONFIG (from environment) ---
+# =======================================================
+# CONFIG
+# =======================================================
 SG_URL = os.environ.get("SG_URL")
 SG_SCRIPT_NAME = os.environ.get("SG_SCRIPT_NAME")
 SG_SCRIPT_KEY = os.environ.get("SG_SCRIPT_KEY")
@@ -17,22 +19,19 @@ FMP_DB = os.environ.get("FMP_DB")
 FMP_USERNAME = os.environ.get("FMP_USERNAME")
 FMP_PASSWORD = os.environ.get("FMP_PASSWORD")
 
-# --- CONNECT TO SHOTGRID ---
+# ShotGrid connection
 sg = Shotgun(SG_URL, script_name=SG_SCRIPT_NAME, api_key=SG_SCRIPT_KEY)
 
 
-# -------------------------------------------------------
+# =======================================================
 # FILEMAKER HELPERS
-# -------------------------------------------------------
+# =======================================================
 def fmp_login():
-    """Authenticate to FileMaker Data API and return session token"""
+    """Authenticate to FileMaker Data API and return session token."""
     url = f"{FMP_SERVER}/fmi/data/vLatest/databases/{FMP_DB}/sessions"
-    auth_string = f"{FMP_USERNAME}:{FMP_PASSWORD}"
-    auth_base64 = b64encode(auth_string.encode("utf-8")).decode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Basic {auth_base64}",
-    }
+    auth = f"{FMP_USERNAME}:{FMP_PASSWORD}"
+    auth_header = b64encode(auth.encode("utf-8")).decode("utf-8")
+    headers = {"Authorization": f"Basic {auth_header}", "Content-Type": "application/json"}
     r = requests.post(url, headers=headers)
     if r.status_code == 200:
         return r.json()["response"]["token"]
@@ -40,14 +39,11 @@ def fmp_login():
 
 
 def fmp_update_timecode_and_cut(token, shot_code, timecode, cut_version):
-    """Find and update a record in FileMaker where Shot Code matches"""
+    """Find and update a record in FileMaker where Shot Code matches."""
     try:
         # --- Find matching record ---
         url_find = f"{FMP_SERVER}/fmi/data/vLatest/databases/{FMP_DB}/layouts/status_update/_find"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        }
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         query = {"query": [{"Shot Code": str(shot_code)}]}
         find_response = requests.post(url_find, headers=headers, json=query)
 
@@ -60,14 +56,9 @@ def fmp_update_timecode_and_cut(token, shot_code, timecode, cut_version):
 
         record_id = data[0]["recordId"]
 
-        # --- Update Timecode and Cut fields ---
+        # --- Update Timecode + Cut Version fields ---
         url_update = f"{FMP_SERVER}/fmi/data/vLatest/databases/{FMP_DB}/layouts/status_update/records/{record_id}"
-        update_data = {
-            "fieldData": {
-                "Timecode": timecode,
-                "Cut Version": cut_version
-            }
-        }
+        update_data = {"fieldData": {"Timecode": timecode, "Cut Version": cut_version}}
         update_response = requests.patch(url_update, headers=headers, json=update_data)
 
         if update_response.status_code == 200:
@@ -79,16 +70,16 @@ def fmp_update_timecode_and_cut(token, shot_code, timecode, cut_version):
         return {"success": False, "error": str(e)}
 
 
-# -------------------------------------------------------
-# MAIN EDL → SG → FMP UPDATE LOGIC
-# -------------------------------------------------------
+# =======================================================
+# MAIN LOGIC: EDL → SG → FMP
+# =======================================================
 @app.route("/update_timecode", methods=["POST"])
 def upload_edl():
     """
-    Upload an EDL file:
-      1. Parse title, event + LOC lines to extract (Shot Code, record-in timecode, Cut Name)
+    Upload an EDL file and sync:
+      1. Parse title (cut version), event + LOC lines to extract (Shot Code, record-in)
       2. Update sg_timecode and sg_from_cut in ShotGrid
-      3. Update Timecode and Cut Version field in FileMaker where Shot Code matches
+      3. Update Timecode and Cut Version fields in FileMaker
     """
     try:
         edl_file = request.files.get("edl")
@@ -115,27 +106,16 @@ def upload_edl():
             if event_line_re.match(raw):
                 parts = re.split(r"\s+", raw.strip())
                 timecodes = [p for p in parts if timecode_re.match(p)]
-                if len(timecodes) >= 2:
-                    rec_in = timecodes[-2]
-                elif len(timecodes) == 1:
-                    rec_in = timecodes[0]
-                else:
-                    rec_in = None
+                rec_in = timecodes[-2] if len(timecodes) >= 2 else (timecodes[0] if timecodes else None)
                 events.append((idx, rec_in, raw))
 
+        # --- Pass 2: match LOC lines to events ---
         parsed_pairs = []
         parse_errors = []
-
-        # --- Pass 2: find LOC lines for each event ---
         for i, (evt_idx, rec_in, evt_line) in enumerate(events):
             end_idx = events[i + 1][0] if i + 1 < len(events) else len(lines)
-
             if not rec_in:
-                parse_errors.append({
-                    "event_index": evt_idx,
-                    "reason": "no_rec_in_found",
-                    "event_line": evt_line
-                })
+                parse_errors.append({"event_index": evt_idx, "reason": "no_rec_in_found"})
                 continue
 
             found_loc = False
@@ -144,88 +124,56 @@ def upload_edl():
                 if loc_line_re.search(loc_raw):
                     m = shot_code_re.search(loc_raw)
                     if m:
-                        shot_code = m.group(1).strip()
-                        parsed_pairs.append({
-                            "event_index": evt_idx,
-                            "rec_in": rec_in,
-                            "shot_code": shot_code
-                        })
+                        parsed_pairs.append({"shot_code": m.group(1).strip(), "rec_in": rec_in})
                     else:
-                        parse_errors.append({
-                            "event_index": evt_idx,
-                            "reason": "loc_found_but_no_shot_code",
-                            "line": loc_raw.strip()
-                        })
+                        parse_errors.append({"event_index": evt_idx, "reason": "LOC found but no shot code"})
                     found_loc = True
                     break
             if not found_loc:
-                parse_errors.append({
-                    "event_index": evt_idx,
-                    "reason": "no_loc_found_between_events"
-                })
+                parse_errors.append({"event_index": evt_idx, "reason": "no LOC found"})
 
-        # --- If nothing parsed, return that early (makes debugging easier) ---
+        # --- If nothing parsed, return early ---
         if not parsed_pairs:
-            response = {
-                "parsed_count": 0,
-                "parsed": [],
-                "parse_errors": parse_errors,
-                "updated_sg": 0,
-                "updated_fmp": 0,
-                "skipped": 0,
-                "sg_errors": [],
-                "fmp_errors": [],
-                "cut_version": cut_version
-            }
-            # return HTML if browser, otherwise JSON
+            msg = {"cut_version": cut_version, "parsed_count": 0, "parse_errors": parse_errors}
             if "text/html" in request.accept_mimetypes:
-                html = render_template_string("""
-                    <html><body style="font-family:sans-serif;padding:30px;">
-                      <h2>No shots parsed</h2>
-                      <p>Cut Version: {{cut_version}}</p>
-                      <pre>{{response}}</pre>
-                      <a href="/">Upload another EDL</a>
-                    </body></html>
-                """, cut_version=cut_version, response=response)
-                return html
-            return jsonify(response), 200
-        
+                return render_template_string("""
+                <html><body style="font-family:sans-serif;padding:30px;">
+                  <h2>No shots parsed</h2>
+                  <p>Cut Version: {{cut_version}}</p>
+                  <pre>{{msg}}</pre>
+                  <a href="/">Upload another EDL</a>
+                </body></html>
+                """, cut_version=cut_version, msg=msg)
+            return jsonify(msg), 200
+
         # --- Connect to FileMaker ---
         fmp_token = fmp_login()
 
-        updated_sg = 0
-        updated_fmp = 0
-        skipped = 0
-        fmp_errors = []
-        sg_errors = []
+        updated_sg, updated_fmp, skipped = 0, 0, 0
+        fmp_errors, sg_errors = [], []
 
-        # --- Update both SG + FMP ---
+        # --- Update SG + FMP ---
         for p in parsed_pairs:
-            shot_code = p["shot_code"]
-            rec_in = p["rec_in"]
-
+            shot_code, rec_in = p["shot_code"], p["rec_in"]
             try:
-                # ShotGrid
                 shot = sg.find_one("Shot", [["code", "is", shot_code]], ["id"])
-                if shot:
-                    sg.update("Shot", shot["id"], {"sg_timecode": rec_in, "sg_from_cut": cut_version})
-                    updated_sg += 1
-
-                    # FileMaker
-                    fmp_result = fmp_update_timecode_and_cut(fmp_token, shot_code, rec_in, cut_version)
-                    if fmp_result["success"]:
-                        updated_fmp += 1
-                    else:
-                        fmp_errors.append({
-                            "shot_code": shot_code,
-                            "error": fmp_result["error"]
-                        })
-                else:
+                if not shot:
                     skipped += 1
+                    continue
+
+                sg.update("Shot", shot["id"], {"sg_timecode": rec_in, "sg_from_cut": cut_version})
+                updated_sg += 1
+
+                fmp_result = fmp_update_timecode_and_cut(fmp_token, shot_code, rec_in, cut_version)
+                if fmp_result["success"]:
+                    updated_fmp += 1
+                else:
+                    fmp_errors.append({"shot_code": shot_code, "error": fmp_result["error"]})
+
             except Exception as e:
                 sg_errors.append({"shot_code": shot_code, "error": str(e)})
 
-        # --- Summary JSON ---
+        # --- Final summary ---
         result = {
             "cut_version": cut_version,
             "parsed_count": len(parsed_pairs),
@@ -237,54 +185,50 @@ def upload_edl():
             "fmp_errors": fmp_errors,
             "message": f"✅ Updated {updated_sg} shots in SG and {updated_fmp} in FMP. Skipped {skipped}."
         }
-        return jsonify(result), 200
 
-        # HTML summary for browser users
+        # --- Return HTML summary if browser ---
         if "text/html" in request.accept_mimetypes:
-            html = render_template_string("""
-                <html><body style="font-family:sans-serif;padding:30px;">
-                  <h2>✅ EDL Upload Summary</h2>
-                  <p><b>Cut Version:</b> {{result.cut_version}}</p>
-                  <p><b>Parsed:</b> {{result.parsed_count}} &nbsp; <b>Updated (SG):</b> {{result.updated_sg}} &nbsp; <b>Updated (FMP):</b> {{result.updated_fmp}} &nbsp; <b>Skipped:</b> {{result.skipped}}</p>
-                  <h3>Parsed Shots</h3>
-                  <ul>
-                    {% for p in result.parsed %}
-                      <li>{{p.shot_code}} — {{p.rec_in}}</li>
-                    {% endfor %}
-                  </ul>
-                  {% if result.parse_errors %}
-                    <h3>Parse Errors</h3>
-                    <ul>{% for e in result.parse_errors %}<li>{{e}}</li>{% endfor %}</ul>
-                  {% endif %}
-                  {% if result.sg_errors %}
-                    <h3>ShotGrid Errors</h3>
-                    <ul>{% for e in result.sg_errors %}<li>{{e}}</li>{% endfor %}</ul>
-                  {% endif %}
-                  {% if result.fmp_errors %}
-                    <h3>FileMaker Errors</h3>
-                    <ul>{% for e in result.fmp_errors %}<li>{{e}}</li>{% endfor %}</ul>
-                  {% endif %}
-                  <p><a href="/">← Upload another EDL</a></p>
-                </body></html>
-            """, result=result)
-            return html, 200
+            return render_template_string("""
+            <html><body style="font-family:sans-serif;padding:30px;">
+              <h2>✅ EDL Sync Summary</h2>
+              <p><b>Cut Version:</b> {{r.cut_version}}</p>
+              <p><b>Parsed:</b> {{r.parsed_count}} &nbsp; 
+                 <b>Updated (SG):</b> {{r.updated_sg}} &nbsp; 
+                 <b>Updated (FMP):</b> {{r.updated_fmp}} &nbsp; 
+                 <b>Skipped:</b> {{r.skipped}}</p>
+              
+              {% if r.parse_errors %}
+                <h3>Parse Errors</h3>
+                <ul>{% for e in r.parse_errors %}<li>{{e}}</li>{% endfor %}</ul>
+              {% endif %}
+              {% if r.sg_errors %}
+                <h3>ShotGrid Errors</h3>
+                <ul>{% for e in r.sg_errors %}<li>{{e}}</li>{% endfor %}</ul>
+              {% endif %}
+              {% if r.fmp_errors %}
+                <h3>FileMaker Errors</h3>
+                <ul>{% for e in r.fmp_errors %}<li>{{e}}</li>{% endfor %}</ul>
+              {% endif %}
+              
+              <p><a href="/">← Upload another EDL</a></p>
+            </body></html>
+            """, r=result)
 
-        # default JSON response
         return jsonify(result), 200
-    
+
     except Exception as e:
         return jsonify({"fatal_error": str(e)}), 500
 
 
-# -------------------------------------------------------
-# SIMPLE UPLOAD FORM (for your VFX editor)
-# -------------------------------------------------------
+# =======================================================
+# SIMPLE UPLOAD FORM
+# =======================================================
 @app.route("/")
 def index():
-    return '''
+    return """
     <html>
     <head>
-        <title>EDL Timecode Uploader</title>
+        <title>EDL Importer</title>
         <style>
             body { font-family: sans-serif; background: #111; color: #eee;
                    display: flex; flex-direction: column; align-items: center;
@@ -299,18 +243,18 @@ def index():
         </style>
     </head>
     <body>
-        <h2>EDL Timecode Uploader</h2>
+        <h2>Update Cut Info</h2>
         <form method="POST" action="/update_timecode" enctype="multipart/form-data">
             <input type="file" name="edl" accept=".edl" required>
-            <button type="submit">Upload and Sync SG + FMP</button>
+            <button type="submit">Update SG & FMP</button>
         </form>
     </body>
     </html>
-    '''
+    """
 
 
-# -------------------------------------------------------
-# MAIN
-# -------------------------------------------------------
+# =======================================================
+# MAIN ENTRY
+# =======================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5002, debug=False)
