@@ -77,134 +77,104 @@ def fmp_update_timecode(token, shot_code, timecode):
 # -------------------------------------------------------
 # MAIN EDL → SG → FMP UPDATE LOGIC
 # -------------------------------------------------------
-@app.route("/update_timecode", methods=["POST"])
+@app.route('/update_timecode', methods=['POST'])
 def upload_edl():
-    """
-    Upload an EDL file:
-      1. Parse event + LOC lines to extract (Shot Code, record-in timecode)
-      2. Update sg_timecode in ShotGrid
-      3. Update Timecode field in FileMaker where Shot Code matches
-    """
-    try:
-        edl_file = request.files.get("edl")
-        if not edl_file:
-            return jsonify({"error": "No EDL uploaded"}), 400
+    edl_file = request.files.get('edl')
+    if not edl_file:
+        return jsonify({"error": "No EDL uploaded"}), 400
 
-        edl_text = edl_file.read().decode("utf-8", errors="ignore")
-        lines = edl_text.splitlines()
+    edl_text = edl_file.read().decode('utf-8')
 
-        # --- Regex patterns ---
-        event_line_re = re.compile(r"^\s*(\d{1,})\s+")
-        shot_code_re = re.compile(r"([A-Z]{3}_[0-9]{3}_[A-Z0-9]{3}_[0-9]{3})", re.IGNORECASE)
-        loc_line_re = re.compile(r"^\s*\*\s*LOC\s*:?", re.IGNORECASE)
-        timecode_re = re.compile(r"^\d{2}:\d{2}:\d{2}:\d{2}$")
+    # --- Parse TITLE line ---
+    title_match = re.search(r"^TITLE:\s*(.*)$", edl_text, re.MULTILINE)
+    cut_version = title_match.group(1).strip() if title_match else "Unknown"
 
-        # --- Pass 1: collect events (line index + rec_in timecode) ---
-        events = []
-        for idx, raw in enumerate(lines):
-            if event_line_re.match(raw):
-                parts = re.split(r"\s+", raw.strip())
-                timecodes = [p for p in parts if timecode_re.match(p)]
-                if len(timecodes) >= 2:
-                    rec_in = timecodes[-2]
-                elif len(timecodes) == 1:
-                    rec_in = timecodes[0]
-                else:
-                    rec_in = None
-                events.append((idx, rec_in, raw))
+    lines = edl_text.splitlines()
+    parsed = []
+    errors = []
 
-        parsed_pairs = []
-        parse_errors = []
+    for i, line in enumerate(lines):
+        event_match = re.match(
+            r"^\s*\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+(?P<rec_in>\d{2}:\d{2}:\d{2}:\d{2})\s+\S+",
+            line
+        )
+        if event_match:
+            rec_in = event_match.group("rec_in")
 
-        # --- Pass 2: find LOC lines for each event ---
-        for i, (evt_idx, rec_in, evt_line) in enumerate(events):
-            end_idx = events[i + 1][0] if i + 1 < len(events) else len(lines)
-
-            if not rec_in:
-                parse_errors.append({
-                    "event_index": evt_idx,
-                    "reason": "no_rec_in_found",
-                    "event_line": evt_line
-                })
-                continue
-
-            found_loc = False
-            for j in range(evt_idx + 1, end_idx):
-                loc_raw = lines[j]
-                if loc_line_re.search(loc_raw):
-                    m = shot_code_re.search(loc_raw)
-                    if m:
-                        shot_code = m.group(1).strip()
-                        parsed_pairs.append({
-                            "event_index": evt_idx,
+            # find the next * LOC line after this event
+            for j in range(i + 1, min(i + 6, len(lines))):
+                if lines[j].startswith("* LOC:"):
+                    loc_match = re.match(
+                        r"\* LOC:\s+\S+\s+\S+\s+(?P<shot_code>[A-Z0-9_]+)",
+                        lines[j]
+                    )
+                    if loc_match:
+                        shot_code = loc_match.group("shot_code")
+                        parsed.append({
                             "rec_in": rec_in,
                             "shot_code": shot_code
                         })
-                    else:
-                        parse_errors.append({
-                            "event_index": evt_idx,
-                            "reason": "loc_found_but_no_shot_code",
-                            "line": loc_raw.strip()
-                        })
-                    found_loc = True
                     break
-            if not found_loc:
-                parse_errors.append({
-                    "event_index": evt_idx,
-                    "reason": "no_loc_found_between_events"
+
+    updated, skipped, update_errors = 0, 0, []
+
+    for entry in parsed:
+        try:
+            shot = sg.find_one("Shot", [["code", "is", entry["shot_code"]]], ["id"])
+            if shot:
+                sg.update("Shot", shot["id"], {
+                    "sg_timecode": entry["rec_in"],
+                    "sg_from_cut": cut_version
                 })
+                # --- Push to FileMaker ---
+                try:
+                    fmp_url = os.environ.get("FMP_URL")
+                    fmp_auth = (os.environ.get("FMP_USER"), os.environ.get("FMP_PASS"))
+                    payload = {
+                        "layout": "status_update",
+                        "query": [{"Shot Code": entry["shot_code"]}],
+                        "fieldData": {
+                            "Timecode": entry["rec_in"],
+                            "Cut Version": cut_version
+                        }
+                    }
+                    r = requests.post(
+                        f"{fmp_url}/record/update",
+                        auth=fmp_auth,
+                        json=payload,
+                        timeout=10
+                    )
+                    if not r.ok:
+                        raise Exception(f"FMP update failed ({r.status_code})")
+                except Exception as fmp_err:
+                    update_errors.append(f"FMP: {fmp_err}")
+                updated += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            update_errors.append(str(e))
 
-        # --- Connect to FileMaker ---
-        fmp_token = fmp_login()
+    # --- HTML Summary ---
+    html_summary = f"""
+    <html>
+      <head><title>EDL Update Summary</title></head>
+      <body style="font-family:sans-serif; line-height:1.5;">
+        <h2>✅ EDL Upload Summary</h2>
+        <p><b>Cut Version:</b> {cut_version}</p>
+        <p><b>Updated:</b> {updated} shots<br>
+           <b>Skipped:</b> {skipped}<br>
+           <b>Errors:</b> {len(update_errors)}</p>
+        <hr>
+        <h3>Parsed Shots</h3>
+        <ul>
+          {''.join([f"<li>{p['shot_code']} – {p['rec_in']}</li>" for p in parsed])}
+        </ul>
+        {'<hr><h3>Errors</h3><ul>' + ''.join(f'<li>{e}</li>' for e in update_errors) + '</ul>' if update_errors else ''}
+      </body>
+    </html>
+    """
 
-        updated_sg = 0
-        updated_fmp = 0
-        skipped = 0
-        fmp_errors = []
-        sg_errors = []
-
-        # --- Update both SG + FMP ---
-        for p in parsed_pairs:
-            shot_code = p["shot_code"]
-            rec_in = p["rec_in"]
-
-            try:
-                # ShotGrid
-                shot = sg.find_one("Shot", [["code", "is", shot_code]], ["id"])
-                if shot:
-                    sg.update("Shot", shot["id"], {"sg_timecode": rec_in})
-                    updated_sg += 1
-
-                    # FileMaker
-                    fmp_result = fmp_update_timecode(fmp_token, shot_code, rec_in)
-                    if fmp_result["success"]:
-                        updated_fmp += 1
-                    else:
-                        fmp_errors.append({
-                            "shot_code": shot_code,
-                            "error": fmp_result["error"]
-                        })
-                else:
-                    skipped += 1
-            except Exception as e:
-                sg_errors.append({"shot_code": shot_code, "error": str(e)})
-
-        # --- Summary JSON ---
-        result = {
-            "parsed_count": len(parsed_pairs),
-            "updated_sg": updated_sg,
-            "updated_fmp": updated_fmp,
-            "skipped": skipped,
-            "parse_errors": parse_errors,
-            "sg_errors": sg_errors,
-            "fmp_errors": fmp_errors,
-            "message": f"✅ Updated {updated_sg} shots in SG and {updated_fmp} in FMP. Skipped {skipped}."
-        }
-        return jsonify(result), 200
-
-    except Exception as e:
-        return jsonify({"fatal_error": str(e)}), 500
-
+    return html_summary, 200, {"Content-Type": "text/html"}
 
 # -------------------------------------------------------
 # SIMPLE UPLOAD FORM (for your VFX editor)
@@ -214,7 +184,7 @@ def index():
     return '''
     <html>
     <head>
-        <title>EDL Timecode Uploader</title>
+        <title>Update Cut Data</title>
         <style>
             body { font-family: sans-serif; background: #111; color: #eee;
                    display: flex; flex-direction: column; align-items: center;
@@ -229,10 +199,10 @@ def index():
         </style>
     </head>
     <body>
-        <h2>EDL Timecode Uploader</h2>
+        <h2>EDL Uploader</h2>
         <form method="POST" action="/update_timecode" enctype="multipart/form-data">
             <input type="file" name="edl" accept=".edl" required>
-            <button type="submit">Upload and Sync SG + FMP</button>
+            <button type="submit">Update SG & FMP</button>
         </form>
     </body>
     </html>
