@@ -196,7 +196,20 @@ def upload_edl():
         # --- HTML summary for browser users ---
         if "text/html" in request.accept_mimetypes:
             html = render_template_string("""
-                <html><body style="font-family:sans-serif;padding:30px;line-height:1.5;">
+                <html>
+                <head>
+                    <style>
+                        body { font-family:sans-serif; padding:30px; line-height:1.5; background:#111; color:#eee; }
+                        h2, h3 { color:#6fd96f; }
+                        a { color:#6fd96f; text-decoration:none; }
+                        ul { list-style-type:disc; margin-left:20px; }
+                        details { background:#222; padding:10px; border-radius:8px; margin-top:10px; }
+                        summary { cursor:pointer; font-weight:bold; color:#6fd96f; }
+                        summary:hover { text-decoration:underline; }
+                        li { font-family:monospace; }
+                    </style>
+                </head>
+                <body>
                   <h2>✅ EDL Sync Summary</h2>
                   <p><b>Cut Version:</b> {{result.cut_version}}</p>
                   <p>
@@ -216,26 +229,33 @@ def upload_edl():
                   {% endif %}
 
                   {% if result.updated_shots %}
-                    <h3>Shots Updated:</h3>
-                    <ul>
-                      {% for shot in result.updated_shots %}
-                        <li>{{shot}}</li>
-                      {% endfor %}
-                    </ul>
+                    <details open>
+                      <summary>Shots Updated ({{result.updated_shots|length}})</summary>
+                      <ul>
+                        {% for shot in result.updated_shots %}
+                          <li>{{shot}}</li>
+                        {% endfor %}
+                      </ul>
+                    </details>
                   {% endif %}
 
                   {% if result.sg_errors %}
-                    <h3>ShotGrid Errors:</h3>
-                    <ul>{% for e in result.sg_errors %}<li>{{e}}</li>{% endfor %}</ul>
+                    <details>
+                      <summary>ShotGrid Errors ({{result.sg_errors|length}})</summary>
+                      <ul>{% for e in result.sg_errors %}<li>{{e}}</li>{% endfor %}</ul>
+                    </details>
                   {% endif %}
 
                   {% if result.fmp_errors %}
-                    <h3>FileMaker Errors:</h3>
-                    <ul>{% for e in result.fmp_errors %}<li>{{e}}</li>{% endfor %}</ul>
+                    <details>
+                      <summary>FileMaker Errors ({{result.fmp_errors|length}})</summary>
+                      <ul>{% for e in result.fmp_errors %}<li>{{e}}</li>{% endfor %}</ul>
+                    </details>
                   {% endif %}
 
                   <p><a href="/">← Upload another EDL</a></p>
-                </body></html>
+                </body>
+                </html>
             """, result=result, error_summary=error_summary)
             return html, 200
 
