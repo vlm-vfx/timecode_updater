@@ -173,7 +173,7 @@ def upload_edl():
             except Exception as e:
                 sg_errors.append({"shot_code": shot_code, "error": str(e)})
 
-        # --- Final summary ---
+        # --- Summary JSON ---
         result = {
             "cut_version": cut_version,
             "parsed_count": len(parsed_pairs),
@@ -183,37 +183,63 @@ def upload_edl():
             "parse_errors": parse_errors,
             "sg_errors": sg_errors,
             "fmp_errors": fmp_errors,
-            "message": f"✅ Updated {updated_sg} shots in SG and {updated_fmp} in FMP. Skipped {skipped}."
+            "message": f"✅ Updated {updated_sg} shots in SG and {updated_fmp} in FMP. Skipped {skipped}.",
+            "updated_shots": [p["shot_code"] for p in parsed_pairs if p["shot_code"] not in [e.get("shot_code") for e in sg_errors + fmp_errors]]
         }
 
-        # --- Return HTML summary if browser ---
-        if "text/html" in request.accept_mimetypes:
-            return render_template_string("""
-            <html><body style="font-family:sans-serif;padding:30px;">
-              <h2>✅ EDL Sync Summary</h2>
-              <p><b>Cut Version:</b> {{r.cut_version}}</p>
-              <p><b>Parsed:</b> {{r.parsed_count}} &nbsp; 
-                 <b>Updated (SG):</b> {{r.updated_sg}} &nbsp; 
-                 <b>Updated (FMP):</b> {{r.updated_fmp}} &nbsp; 
-                 <b>Skipped:</b> {{r.skipped}}</p>
-              
-              {% if r.parse_errors %}
-                <h3>Parse Errors</h3>
-                <ul>{% for e in r.parse_errors %}<li>{{e}}</li>{% endfor %}</ul>
-              {% endif %}
-              {% if r.sg_errors %}
-                <h3>ShotGrid Errors</h3>
-                <ul>{% for e in r.sg_errors %}<li>{{e}}</li>{% endfor %}</ul>
-              {% endif %}
-              {% if r.fmp_errors %}
-                <h3>FileMaker Errors</h3>
-                <ul>{% for e in r.fmp_errors %}<li>{{e}}</li>{% endfor %}</ul>
-              {% endif %}
-              
-              <p><a href="/">← Upload another EDL</a></p>
-            </body></html>
-            """, r=result)
+        # --- Group parse errors by reason ---
+        error_summary = {}
+        for e in parse_errors:
+            reason = e.get("reason", "unknown")
+            error_summary[reason] = error_summary.get(reason, 0) + 1
 
+        # --- HTML summary for browser users ---
+        if "text/html" in request.accept_mimetypes:
+            html = render_template_string("""
+                <html><body style="font-family:sans-serif;padding:30px;line-height:1.5;">
+                  <h2>✅ EDL Sync Summary</h2>
+                  <p><b>Cut Version:</b> {{result.cut_version}}</p>
+                  <p>
+                    <b>Parsed:</b> {{result.parsed_count}} &nbsp; 
+                    <b>Updated (SG):</b> {{result.updated_sg}} &nbsp; 
+                    <b>Updated (FMP):</b> {{result.updated_fmp}} &nbsp; 
+                    <b>Skipped:</b> {{result.skipped}}
+                  </p>
+
+                  {% if error_summary %}
+                    <h3>Parse Errors:</h3>
+                    <ul>
+                      {% for reason, count in error_summary.items() %}
+                        <li>{{reason}}: {{count}}</li>
+                      {% endfor %}
+                    </ul>
+                  {% endif %}
+
+                  {% if result.updated_shots %}
+                    <h3>Shots Updated:</h3>
+                    <ul>
+                      {% for shot in result.updated_shots %}
+                        <li>{{shot}}</li>
+                      {% endfor %}
+                    </ul>
+                  {% endif %}
+
+                  {% if result.sg_errors %}
+                    <h3>ShotGrid Errors:</h3>
+                    <ul>{% for e in result.sg_errors %}<li>{{e}}</li>{% endfor %}</ul>
+                  {% endif %}
+
+                  {% if result.fmp_errors %}
+                    <h3>FileMaker Errors:</h3>
+                    <ul>{% for e in result.fmp_errors %}<li>{{e}}</li>{% endfor %}</ul>
+                  {% endif %}
+
+                  <p><a href="/">← Upload another EDL</a></p>
+                </body></html>
+            """, result=result, error_summary=error_summary)
+            return html, 200
+
+        # default JSON response
         return jsonify(result), 200
 
     except Exception as e:
